@@ -56,10 +56,12 @@ Requires a C++23 MSVC toolchain and vcpkg (wired up via the CMake preset).
 
 - **Parapets / [Exit-9B](https://github.com/Exit-9B)** — original author of
   SimultaneousInput.
+- **[FullStack0verfl0w](https://github.com/FullStack0verfl0w)** — fork this one is
+  based on; kept the mod updated for an earlier Starfield version.
 - **[gitlostinit](https://github.com/gitlostinit)** — reverse-engineering and
   Address Library IDs for current Starfield builds.
 - **[Platin117](https://github.com/Platin117)** — fix and update for Starfield
-  1.16.244.
+  1.16.244, with [Claude Code](https://claude.com/claude-code).
 
 ## License
 
