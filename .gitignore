@@ -1,1 +1,15 @@
 build*/
+
+Address Library
+
+# IDE / tooling
+.vs/
+.xmake/
+
+# local dev scratch / experiment artifacts
+out.txt
+poll_dump.bin
+edit_summary.txt
+*.log
+*.log.lnk
+/user updatet/

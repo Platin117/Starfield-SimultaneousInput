@@ -1,190 +1,156 @@
-#include "Plugin.h"
+// SimultaneousInput — allow mouse look and gamepad input at the same time.
+//
+// Starfield switches the whole input system between "mouse/keyboard" and
+// "gamepad" mode and discards the inactive device. That makes it impossible to
+// walk with an analog stick (which the game sees as a gamepad) while aiming with
+// the mouse. This plugin keeps both alive:
+//
+//   1. LookHandler::ShouldHandleEvent (vtable slot 1) is wrapped so a "Look"
+//      event from EITHER the mouse or a thumbstick is accepted, instead of only
+//      the currently-active device's.
+//   2. BSPCGamepadDevice::Poll is patched so moving the (left) stick no longer
+//      latches the active input device to the gamepad. The game therefore stays
+//      in mouse mode for look processing — mouse aiming keeps mouse sensitivity
+//      and orientation — while the stick still drives analog movement.
+//
+// Everything is resolved through the SFSE Address Library at runtime, so the
+// plugin is not pinned to a single game build.
+
 #include "RE/Offset.Ext.h"
 
-#include "REL/Module.h"
-#include "REL/Pattern.h"
+#include "SFSE/SFSE.h"
+
 #include "REL/Relocation.h"
-#include "SFSE/API.h"
-#include "SFSE/Interfaces.h"
-#include "SFSE/Logger.h"
-#include "SFSE/Trampoline.h"
+#include "REX/LOG.h"
+#include "REX/W32/KERNEL32.h"
 
-#include "RE/B/BSFixedString.h"
-#include "RE/MouseMoveEvent.h"
-#include "RE/UserEvents.h"
+#include "RE/B/BSInputEventUser.h"
 
-#include <spdlog/spdlog.h>
-#ifdef NDEBUG
-#include <spdlog/sinks/basic_file_sink.h>
-#else
-#include <spdlog/sinks/msvc_sink.h>
-#endif
-
-#include <array>
-#include <format>
-#include <memory>
-#include <tuple>
-#include <utility>
+#include <atomic>
+#include <cstdint>
+#include <exception>
 
 using namespace std::string_view_literals;
 
 #define DLLEXPORT __declspec(dllexport)
-#define SFSEAPI __cdecl
+#define SFSEAPI   __cdecl
 
-namespace
+namespace Plugin
 {
-	void InitializeLog()
-	{
-#ifndef NDEBUG
-		auto sink = std::make_shared<spdlog::sinks::msvc_sink_mt>();
-#else
-		auto path = SFSE::log::log_directory();
-		if (!path) {
-			SFSE::stl::report_and_fail("Failed to find standard logging directory"sv);
-		}
-
-		*path /= std::format("{}.log"sv, Plugin::NAME);
-		auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
-			path->string(),
-			true);
-#endif
-
-#ifndef NDEBUG
-		const auto level = spdlog::level::trace;
-#else
-		const auto level = spdlog::level::info;
-#endif
-
-		auto log = std::make_shared<spdlog::logger>("global log", std::move(sink));
-		log->set_level(level);
-		log->flush_on(level);
-
-		spdlog::set_default_logger(std::move(log));
-		spdlog::set_pattern("%s(%#): [%^%l%$] %v");
-	}
+	inline constexpr auto NAME = "SimultaneousInput"sv;
+	inline constexpr auto VERSION = REL::Version(1, 2, 0);
 }
 
-extern "C" DLLEXPORT constexpr auto SFSEPlugin_Version = []()
-{
+extern "C" DLLEXPORT constinit auto SFSEPlugin_Version = []() {
 	SFSE::PluginVersionData v{};
-
 	v.PluginVersion(Plugin::VERSION);
 	v.PluginName(Plugin::NAME);
-	v.AuthorName("Parapets");
+	v.AuthorName("Parapets");  // original author; maintainers are credited in the README
 
+	// Resolve everything through the Address Library at runtime and let SFSE
+	// grant the load on any layout-compatible runtime the AL DB covers, rather
+	// than pinning a single game version.
 	v.UsesAddressLibrary(true);
 	v.IsLayoutDependent(true);
-
 	return v;
 }();
 
 namespace RE
 {
-	class BSInputDeviceManager;
-
+	// Opaque to us — the shim only forwards it to the original implementation.
 	namespace PlayerControls
 	{
 		class LookHandler;
 	}
 }
 
-bool IsUsingGamepad(RE::BSInputDeviceManager* a_inputDeviceManager)
+namespace
 {
-	using func_t = decltype(IsUsingGamepad);
-	REL::Relocation<func_t> func{ RE::Offset::BSInputDeviceManager::IsUsingGamepad };
-	return func(a_inputDeviceManager);
-}
+	using ShouldHandleEvent_t = bool (*)(RE::PlayerControls::LookHandler*, const RE::InputEvent*);
+	using QLook_t = const char* const* (*)();
+	using QUserEvent_t = const char* const* (*)(const RE::InputEvent*);
 
-static bool UsingThumbstickLook = false;
+	ShouldHandleEvent_t g_origShouldHandleEvent = nullptr;
+	QLook_t             g_qLook = nullptr;
 
-bool IsUsingThumbstickLook(RE::BSInputDeviceManager*)
-{
-	return UsingThumbstickLook;
-}
+	// True when `a_event` is a "Look" event. The engine classifies this by
+	// comparing the event's user-event tag (vtable slot 2) against the interned
+	// "Look" string returned by QLook(); interned strings compare by pointer
+	// identity. Returns false (so the shim simply defers to the original) until
+	// QLook has resolved.
+	bool IsLookEvent(const RE::InputEvent* a_event)
+	{
+		if (!g_qLook || !a_event) {
+			return false;
+		}
+		const auto vtbl = *reinterpret_cast<void* const* const*>(a_event);
+		const auto getTag = reinterpret_cast<QUserEvent_t>(vtbl[2]);
+		const auto tag = getTag(a_event);
+		const auto look = g_qLook();
+		return tag && look && *tag == *look;
+	}
 
-bool IsGamepadCursor(RE::BSInputDeviceManager* a_inputDeviceManager)
-{
-	return UsingThumbstickLook && IsUsingGamepad(a_inputDeviceManager);
+	// Wraps LookHandler::ShouldHandleEvent: accept a Look event from either the
+	// mouse or a thumbstick; defer everything else (buttons, movement, cursor
+	// moves) to the original so their normal handling is unchanged.
+	bool ShouldHandleEvent_Shim(RE::PlayerControls::LookHandler* a_self, const RE::InputEvent* a_event)
+	{
+		if (IsLookEvent(a_event)) {
+			switch (a_event->eventType) {
+			case RE::InputEvent::EventType::kMouseMove:
+			case RE::InputEvent::EventType::kThumbstick:
+				return true;
+			default:
+				break;
+			}
+		}
+		return g_origShouldHandleEvent(a_self, a_event);
+	}
+
+	// Overwrite the immediate of `mov byte ptr [rbx+8], 1` (C6 43 08 01) with 0
+	// at every match inside BSPCGamepadDevice::Poll. That store latches the
+	// active input device to the gamepad when the stick crosses its activation
+	// threshold; clearing it keeps the game in mouse mode for look processing
+	// while the stick still drives analog movement.
+	unsigned PatchGamepadDeviceLatch()
+	{
+		REL::Relocation<std::uintptr_t> poll(RE::Offset::BSPCGamepadDevice::Poll);
+		auto* const base = reinterpret_cast<std::uint8_t*>(poll.address());
+
+		unsigned patched = 0;
+		for (std::size_t i = 0; i < 0x800; ++i) {
+			if (base[i] == 0xC6 && base[i + 1] == 0x43 && base[i + 2] == 0x08 && base[i + 3] == 0x01) {
+				std::uint32_t oldProtect = 0;
+				REX::W32::VirtualProtect(base + i + 3, 1, 0x40 /* PAGE_EXECUTE_READWRITE */, &oldProtect);
+				base[i + 3] = 0x00;
+				REX::W32::VirtualProtect(base + i + 3, 1, oldProtect, &oldProtect);
+				++patched;
+			}
+		}
+		return patched;
+	}
 }
 
 extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_sfse)
 {
-	InitializeLog();
-	SFSE::log::info("{} v{}"sv, Plugin::NAME, Plugin::VERSION.string("."sv));
+	SFSE::Init(a_sfse, SFSE::InitInfo{ .trampoline = false });
+	REX::INFO("{} v{} loaded", Plugin::NAME, Plugin::VERSION.string("."sv));
 
-	SFSE::Init(a_sfse);
-	SFSE::AllocTrampoline(28);
+	try {
+		REL::Relocation<QLook_t> qLook(RE::Offset::UserEvents::QLook);
+		g_qLook = qLook.get();
 
-	// Allow any look input
-	{
-		auto vtbl = REL::Relocation<std::uintptr_t>(
-			RE::Offset::PlayerControls::LookHandler::Vtbl);
-		vtbl.write_vfunc(
-			1,
-			+[](RE::PlayerControls::LookHandler*, RE::InputEvent* event) -> bool
-			{
-				if (RE::UserEvents::QLook() != event->QUserEvent()) {
-					return false;
-				}
+		REL::Relocation<std::uintptr_t> vtbl(RE::Offset::PlayerControls::LookHandler::Vtbl);
+		g_origShouldHandleEvent = reinterpret_cast<ShouldHandleEvent_t>(
+			vtbl.write_vfunc(1, &ShouldHandleEvent_Shim));
 
-				if (event->eventType == RE::INPUT_EVENT_TYPE::MouseMove) {
-					UsingThumbstickLook = false;
-				}
-				else if (event->eventType == RE::INPUT_EVENT_TYPE::Thumbstick) {
-					UsingThumbstickLook = true;
-				}
-
-				return true;
-			});
-	}
-
-	// Prevent left thumbstick from changing device
-	{
-		auto hook = REL::Relocation<std::uintptr_t>(
-			RE::Offset::BSPCGamepadDevice::Poll,
-			0x281);
-		REL::Pattern<"C6 43 08 01">().match_or_fail(hook.address());
-
-		const std::uint8_t data[] = { 0xC6, 0x43, 0x08, 0x0 };
-		REL::safe_write(hook.address(), std::span<const std::uint8_t>(data));
-	}
-
-	{
-		auto hookLocs = {
-			// Fix slow movement on 2 quadrants?
-			std::make_pair(RE::Offset::PlayerControls::LookHandler::Func10, 0xE),
-			// Fix look sensitivity
-			std::make_pair(RE::Offset::PlayerControls::Manager::ProcessLookInput, 0x81),
-			// Prevent cursor from escaping window
-			std::make_pair(RE::Offset::Main::Run_WindowsMessageLoop, 0x39),
-			// Fix mouse movement for ship reticle
-			std::make_pair(RE::Offset::ShipHudDataModel::PerformInputProcessing, 0x842),
-			std::make_pair(RE::Offset::ShipHudDataModel::PerformInputProcessing, 0x8BD),
-		};
-
-		auto& trampoline = SFSE::GetTrampoline();
-		for (auto [id, offset] : hookLocs) {
-			auto hook = REL::Relocation<std::uintptr_t>(id, offset);
-			REL::Pattern<"E8">().match_or_fail(hook.address());
-			trampoline.write_call<5>(hook.address(), IsUsingThumbstickLook);
+		const auto patched = PatchGamepadDeviceLatch();
+		if (patched == 0) {
+			REX::WARN("gamepad device latch pattern not found — mouse look may fight gamepad mode");
 		}
-	}
-
-	{
-		auto hookLocs = {
-			// Show cursor for menus
-			std::make_pair(RE::Offset::IMenu::ShowCursor, 0x14),
-			// Use pointer style cursor
-			std::make_pair(RE::Offset::UI::SetCursorStyle, 0x98),
-		};
-
-		auto& trampoline = SFSE::GetTrampoline();
-		for (auto [id, offset] : hookLocs) {
-			auto hook = REL::Relocation<std::uintptr_t>(id, offset);
-
-			REL::Pattern<"E8">().match_or_fail(hook.address());
-			trampoline.write_call<5>(hook.address(), IsGamepadCursor);
-		}
+		REX::INFO("ready: look shim installed, gamepad device latch cleared at {} site(s)", patched);
+	} catch (const std::exception& e) {
+		REX::ERROR("setup failed: {}", e.what());
 	}
 
 	return true;

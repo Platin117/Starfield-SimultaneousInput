@@ -48,16 +48,15 @@
         "value": "x64"
       },
       "cacheVariables": {
-        "CMAKE_CXX_FLAGS": "/EHsc /MP /W4 /WX"
+        "CMAKE_CXX_FLAGS": "/EHsc /MP"
       },
-      "generator": "Visual Studio 17 2022",
+      "generator": "Visual Studio 18",
       "inherits": [
         "cmake-dev",
         "vcpkg",
         "windows"
       ],
-      "name": "vs2022-windows",
-      "toolset": "v143"
+      "name": "vs-windows"
     }
   ],
   "version": 3

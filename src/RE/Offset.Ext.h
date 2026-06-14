@@ -2,57 +2,36 @@
 
 #include "REL/Relocation.h"
 
+// Address Library IDs used by the plugin. All are resolved at runtime against
+// the installed Address Library database, so they stay valid across game builds
+// as long as the IDs themselves remain stable.
 namespace RE
 {
 	namespace Offset
 	{
-		namespace BSInputDeviceManager
-		{
-			constexpr REL::ID IsUsingGamepad{ 178879 };
-		}
-
+		// BSPCGamepadDevice::Poll. Contains `mov byte ptr [rbx+8], 1`
+		// (C6 43 08 01) which latches the active input device to the gamepad
+		// when the stick is moved. The plugin clears the immediate of every
+		// match in the first 0x800 bytes so the stick stops claiming the device.
 		namespace BSPCGamepadDevice
 		{
-			constexpr REL::ID Poll{ 179249 };
+			constexpr REL::ID Poll{ 124384 };
 		}
 
-		namespace IMenu
+		// UserEvents::QLook — getter for the interned "Look" string the engine
+		// compares user-event tags against to classify an event as a look event.
+		namespace UserEvents
 		{
-			constexpr REL::ID ShowCursor{ 187256 };
+			constexpr REL::ID QLook{ 74548 };
 		}
 
-		namespace Main
-		{
-			constexpr REL::ID Run_WindowsMessageLoop{ 149028 };
-		}
-
+		// PlayerControls::LookHandler vtable. Slot 1 is ShouldHandleEvent.
 		namespace PlayerControls
 		{
 			namespace LookHandler
 			{
-				constexpr REL::ID Vtbl{ 407288 };
-				constexpr REL::ID Func10{ 129152 };
+				constexpr REL::ID Vtbl{ 433589 };
 			}
-
-			namespace Manager
-			{
-				constexpr REL::ID ProcessLookInput{ 129407 };
-			}
-		}
-
-		namespace ShipHudDataModel
-		{
-			constexpr REL::ID PerformInputProcessing{ 137087 };
-		}
-
-		namespace UI
-		{
-			constexpr REL::ID SetCursorStyle{ 187051 };
-		}
-
-		namespace UserEvents
-		{
-			constexpr REL::ID QLook{ 120233 };
 		}
 	}
 }

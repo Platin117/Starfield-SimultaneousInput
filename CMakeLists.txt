@@ -1,15 +1,25 @@
 cmake_minimum_required(VERSION 3.24)
 
+# Set the triplet to static for any remaining vcpkg dependencies
+set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "" FORCE)
+
 project(
 	SimultaneousInput
 	VERSION 1.0.3
 	LANGUAGES CXX
 )
 
+# Enforce Dynamic MSVC Runtime (/MD)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
+# C++ Standard to 23
 set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Read Starfield path from registry
 cmake_host_system_information(
 	RESULT Starfield_PATH
 	QUERY WINDOWS_REGISTRY "HKLM/SOFTWARE/Microsoft/Windows/CurrentVersion/Uninstall/Steam App 1716740"
@@ -19,75 +29,91 @@ cmake_host_system_information(
 set(Starfield_PATH ${Starfield_PATH} CACHE PATH "Installed path of Starfield.")
 set(GAME_DIR ${Starfield_PATH})
 
+# Main Target
 add_library(${PROJECT_NAME} SHARED)
 
-file(
-	GLOB_RECURSE
-	HEADER_FILES
-	LIST_DIRECTORIES false
-	CONFIGURE_DEPENDS
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
-)
-
-target_sources(${PROJECT_NAME} PRIVATE ${HEADER_FILES})
-
+# Collect source files
 file(
 	GLOB_RECURSE
 	SOURCE_FILES
 	LIST_DIRECTORIES false
 	CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
 
 target_sources(${PROJECT_NAME} PRIVATE ${SOURCE_FILES})
 
-target_sources(
+# Locate static libraries from CommonLibSF
+find_library(COMMONLIBSF_LIB 
+    NAMES CommonLibSF 
+    PATHS "${CMAKE_CURRENT_SOURCE_DIR}/external/CommonLibSF/lib"
+    REQUIRED
+)
+
+find_library(COMMONLIB_SHARED_LIB 
+    NAMES commonlib-shared 
+    PATHS "${CMAKE_CURRENT_SOURCE_DIR}/external/CommonLibSF/lib"
+    REQUIRED
+)
+
+# Strict warnings for our code, but SYSTEM for external headers to ignore C4201 etc.
+if(MSVC)
+	target_compile_options(${PROJECT_NAME} PRIVATE "/W4" "/WX")
+endif()
+
+# Verified Include Directories
+# Marking external libraries as SYSTEM suppresses their warnings in MSVC.
+target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/CommonLibSF/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/CommonLibSF/lib/commonlib-shared/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/CommonLibSF/lib/commonlib-shared/src"
+    "${CMAKE_CURRENT_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include" # Explicit header-only access
+)
+
+target_include_directories(${PROJECT_NAME} PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+# Linking against CommonLibSF and Windows System Libraries
+# Note: spdlog is NOT linked here to avoid conflicts.
+target_link_libraries(
 	${PROJECT_NAME}
 	PRIVATE
-	.clang-format
-	.editorconfig
-	vcpkg.json
+	${COMMONLIBSF_LIB}
+	${COMMONLIB_SHARED_LIB}
+	advapi32
+	bcrypt
+	dbghelp
+	dxgi
+	d3d11
+	d3dcompiler
+	ole32
+	shell32
+	user32
+	version
+	ws2_32
 )
 
-configure_file(
-	${CMAKE_CURRENT_SOURCE_DIR}/cmake/Plugin.h.in
-	${CMAKE_CURRENT_BINARY_DIR}/src/Plugin.h
-	@ONLY
+target_compile_definitions(${PROJECT_NAME} PRIVATE 
+    _SILENCE_ALL_CXX23_DEPRECATION_WARNINGS
+    SPDLOG_USE_STD_FORMAT
 )
 
-configure_file(
-	${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.rc.in
-	${CMAKE_CURRENT_BINARY_DIR}/version.rc
-	@ONLY
-)
-
-target_sources(
-	${PROJECT_NAME}
-	PRIVATE
-	${CMAKE_CURRENT_BINARY_DIR}/version.rc
-)
-
-target_include_directories(
-	${PROJECT_NAME}
-	PRIVATE
-	${CMAKE_CURRENT_BINARY_DIR}/src
-	${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-
-if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
+# MSVC Specific Options
+if(MSVC)
 	target_compile_options(
 		${PROJECT_NAME}
 		PRIVATE
-		"/sdl" # Enable Additional Security Checks
-		"/utf-8" # Set Source and Executable character sets to UTF-8
-		"/Zi" # Debug Information Format
-
-		"/permissive-" # Standards conformance
-		"/Zc:preprocessor" # Enable preprocessor conformance mode
-
-		"/wd4200" # nonstandard extension used : zero-sized array in struct/union
-
-		"$<$<CONFIG:DEBUG>:>"
+		"/sdl"
+		"/utf-8"
+		"/Zi"
+		"/permissive-"
+		"/Zc:preprocessor"
+		"/wd4200"
+		"/FI\"REX/PCH.h\""           # Injected from commonlib-shared/src
+		"/FI\"SFSE/Impl/PCH.h\""     # Injected from CommonLibSF/include
 		"$<$<CONFIG:RELEASE>:/Zc:inline;/JMC-;/Ob3>"
 	)
 
@@ -99,25 +125,9 @@ if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
 	)
 endif()
 
-add_subdirectory(external/CommonLibSF CommonLibSF EXCLUDE_FROM_ALL)
-
-find_package(spdlog CONFIG REQUIRED)
-
-target_link_libraries(
-	${PROJECT_NAME}
-	CommonLibSF::CommonLibSF
-	spdlog::spdlog
-)
-
-if(CMAKE_GENERATOR MATCHES "Visual Studio")
-	option(CMAKE_VS_INCLUDE_INSTALL_TO_DEFAULT_BUILD "Include INSTALL target to default build." OFF)
-endif()
-
+# Installation
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
-	set(CMAKE_INSTALL_PREFIX "${GAME_DIR}/Data" CACHE PATH
-		"Install path prefix (e.g. Starfield Data directory or Mod Organizer virtual directory)."
-		FORCE
-	)
+	set(CMAKE_INSTALL_PREFIX "${GAME_DIR}/Data" CACHE PATH "Install path prefix" FORCE)
 endif()
 
 install(
@@ -128,7 +138,4 @@ install(
 	COMPONENT SFSEPlugin
 )
 
-set(CPACK_GENERATOR "7Z")
-set(CPACK_PACKAGE_FILE_NAME ${PROJECT_NAME}-${PROJECT_VERSION})
-set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY FALSE)
 include(CPack)
