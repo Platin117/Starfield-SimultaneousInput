@@ -12,9 +12,12 @@
 //      latches the active input device to the gamepad. The game therefore stays
 //      in mouse mode for look processing — mouse aiming keeps mouse sensitivity
 //      and orientation — while the stick still drives analog movement.
+//   3. While the mouse is driving look, the input-mode byte is held to
+//      "mouse/keyboard" so a gamepad *button* press (which the Poll patch does
+//      not cover) can no longer flip look processing into gamepad mode.
 //
-// Everything is resolved through the SFSE Address Library at runtime, so the
-// plugin is not pinned to a single game build.
+// Engine functions are resolved through the SFSE Address Library at runtime. The
+// only build-specific detail is the input-mode object global (see below).
 
 #include "RE/Offset.Ext.h"
 
@@ -38,7 +41,7 @@ using namespace std::string_view_literals;
 namespace Plugin
 {
 	inline constexpr auto NAME = "SimultaneousInput"sv;
-	inline constexpr auto VERSION = REL::Version(1, 2, 0);
+	inline constexpr auto VERSION = REL::Version(1, 2, 1);
 }
 
 extern "C" DLLEXPORT constinit auto SFSEPlugin_Version = []() {
@@ -73,6 +76,15 @@ namespace
 	ShouldHandleEvent_t g_origShouldHandleEvent = nullptr;
 	QLook_t             g_qLook = nullptr;
 
+	// Address of the global that holds the BSInputDeviceManager pointer. The
+	// current input mode is the byte at [*g_modeObjectPtr + 0x60]: 0xFF = mouse/
+	// keyboard, 0 = gamepad. The Poll patch keeps the stick from flipping it, but
+	// a gamepad *button* still flips it to gamepad (set deep in a vfunc-driven
+	// arbiter, no clean in-place patch). So while the mouse drives look we force
+	// it back to mouse/keyboard. Raw RVA is build-specific (1.16.244).
+	std::uintptr_t* g_modeObjectPtr = nullptr;
+	inline constexpr std::uint8_t kModeMouseKeyboard = 0xFF;
+
 	// True when `a_event` is a "Look" event. The engine classifies this by
 	// comparing the event's user-event tag (vtable slot 2) against the interned
 	// "Look" string returned by QLook(); interned strings compare by pointer
@@ -98,6 +110,16 @@ namespace
 		if (IsLookEvent(a_event)) {
 			switch (a_event->eventType) {
 			case RE::InputEvent::EventType::kMouseMove:
+				// The mouse is driving look: keep the game in mouse/keyboard mode so
+				// the camera uses mouse sensitivity/orientation, even if a gamepad
+				// button just flipped the active device to gamepad.
+				if (g_modeObjectPtr) {
+					const auto obj = *g_modeObjectPtr;
+					if (obj) {
+						*reinterpret_cast<std::uint8_t*>(obj + 0x60) = kModeMouseKeyboard;
+					}
+				}
+				return true;
 			case RE::InputEvent::EventType::kThumbstick:
 				return true;
 			default:
@@ -139,6 +161,9 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	try {
 		REL::Relocation<QLook_t> qLook(RE::Offset::UserEvents::QLook);
 		g_qLook = qLook.get();
+
+		g_modeObjectPtr = reinterpret_cast<std::uintptr_t*>(
+			REL::Relocation<std::uintptr_t>(REL::Offset(0x5fd9cd8)).address());
 
 		REL::Relocation<std::uintptr_t> vtbl(RE::Offset::PlayerControls::LookHandler::Vtbl);
 		g_origShouldHandleEvent = reinterpret_cast<ShouldHandleEvent_t>(
