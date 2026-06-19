@@ -41,7 +41,7 @@ using namespace std::string_view_literals;
 namespace Plugin
 {
 	inline constexpr auto NAME = "SimultaneousInput"sv;
-	inline constexpr auto VERSION = REL::Version(1, 2, 1);
+	inline constexpr auto VERSION = REL::Version(1, 5, 0);
 }
 
 extern "C" DLLEXPORT constinit auto SFSEPlugin_Version = []() {
