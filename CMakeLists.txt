@@ -5,7 +5,7 @@ set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "" FORCE)
 
 project(
 	SimultaneousInput
-	VERSION 1.5.1
+	VERSION 1.5.2
 	LANGUAGES CXX
 )
 

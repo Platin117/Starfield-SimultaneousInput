@@ -11,8 +11,8 @@ namespace RE
 	{
 		// BSPCGamepadDevice::Poll. Contains `mov byte ptr [rbx+8], 1`
 		// (C6 43 08 01) which latches the active input device to the gamepad
-		// when the stick is moved. The plugin clears the immediate of every
-		// match in the first 0x800 bytes so the stick stops claiming the device.
+		// when the stick is moved. The plugin clears the immediate so the stick
+		// stops claiming the device.
 		namespace BSPCGamepadDevice
 		{
 			constexpr REL::ID Poll{ 124384 };

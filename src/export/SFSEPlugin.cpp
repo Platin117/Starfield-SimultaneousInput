@@ -42,7 +42,7 @@ using namespace std::string_view_literals;
 namespace Plugin
 {
 	inline constexpr auto NAME = "SimultaneousInput"sv;
-	inline constexpr auto VERSION = REL::Version(1, 5, 1);
+	inline constexpr auto VERSION = REL::Version(1, 5, 2);
 }
 
 extern "C" DLLEXPORT constinit auto SFSEPlugin_Version = []() {
@@ -51,11 +51,13 @@ extern "C" DLLEXPORT constinit auto SFSEPlugin_Version = []() {
 	v.PluginName(Plugin::NAME);
 	v.AuthorName("Parapets");  // original author; maintainers are credited in the README
 
-	// Resolve everything through the Address Library at runtime and let SFSE
-	// grant the load on any layout-compatible runtime the AL DB covers, rather
-	// than pinning a single game version.
-	v.UsesAddressLibrary(true);
-	v.IsLayoutDependent(true);
+	// Pinned to the verified game build. The plugin reads a couple of
+	// build-specific details (a raw input-mode address and byte patterns), so it
+	// must only run on a version it was actually checked against. When Starfield
+	// updates, SFSE reports this plugin as incompatible (the game still launches
+	// fine) until a new build is released for that version — that's the gate, so
+	// the plugin never runs against a binary it doesn't match.
+	v.CompatibleVersions({ REL::Version(1, 16, 244) });
 	return v;
 }();
 
@@ -146,8 +148,9 @@ namespace
 	// Overwrite the immediate of `mov byte ptr [rbx+8], 1` (C6 43 08 01) with 0
 	// at every match inside BSPCGamepadDevice::Poll. That store latches the
 	// active input device to the gamepad when the stick crosses its activation
-	// threshold; clearing it keeps the game in mouse mode for look processing
-	// while the stick still drives analog movement.
+	// threshold; clearing it keeps the game in mouse/keyboard mode for look
+	// processing while the stick still drives analog movement. (The plugin is
+	// pinned to one game version, so the two expected matches are known-good.)
 	unsigned PatchGamepadDeviceLatch()
 	{
 		REL::Relocation<std::uintptr_t> poll(RE::Offset::BSPCGamepadDevice::Poll);
